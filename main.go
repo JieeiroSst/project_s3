@@ -56,3 +56,16 @@ func Service(bucket *s3.Bucket) http.Handler {
 	m.Put("/files/*path").ThenFunc(c.upsertFile)
 	m.Delete("/files/*path").ThenFunc(c.deleteFile)
 	return m
+}
+
+func main() {
+	auth, err := aws.EnvAuth()
+	if err != nil {
+		panic(err)
+	}
+
+	server := s3.New(auth, aws.USEast)
+	b := server.Bucket("foobar.com")
+	h := Service(b)
+	http.ListenAndServe(":8080", h)
+}
