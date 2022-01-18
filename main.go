@@ -15,57 +15,86 @@ import (
 
 
 const (
-	S3_REGION = "eu-west-1"
-	S3_BUCKET = "glacial-io"
+	AWS_S3_REGION = ""
+	AWS_S3_BUCKET = ""
 )
 
+var sess = connectAWS()
 
-func main() {
-	s, err := session.NewSession(&aws.Config{
-		Region: aws.String(S3_REGION),
-		Credentials: credentials.NewStaticCredentials(
-			"XXX",
-			"YYY",
-			""),
-	})
-
+func connectAWS() *session.Session {
+	sess, err := session.NewSession(
+		&aws.Config{
+			Region: aws.String(AWS_S3_REGION)
+		}
+	)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-
-	err = uploadFileToS3(s, "discharge-letter-787653.pdf")
-
-	if err != nil {
-		log.Fatal(err)
-	}
+	return sess
 }
 
-func uploadFileToS3(s *session.Session, fileName string) error {
-	// open the file for use
-	file, err := os.Open(fileName)
+func upload() {
+	file, header, err := r.FormFile("file")
 	if err != nil {
-		return err
+		// Do your error handling here
+		return
 	}
 	defer file.Close()
 
-	// get the file size and read
-	// the file content into a buffer
-	fileInfo, _ := file.Stat()
-	var size = fileInfo.Size()
-	buffer := make([]byte, size)
-	file.Read(buffer)
+	filename := header.Filename
+	uploader := s3manager.NewUploader(sess)
 
-	e, s3err := s3.New(s).PutObject(&s3.PutObjectInput{
-		Bucket:               aws.String(S3_BUCKET),
-		Key:                  aws.String(fileName),
-		ACL:                  aws.String("private"),
-		Body:                 bytes.NewReader(buffer),
-		ContentLength:        aws.Int64(size),
-		ContentType:          aws.String(http.DetectContentType(buffer)),
-		ContentDisposition:   aws.String("attachment"),
-		ServerSideEncryption: aws.String("AES256"),
-		StorageClass:         aws.String("INTELLIGENT_TIERING"),
+	_, err = uploader.Upload(&s3manager.UploadInput{
+		Bucket: aws.String(AWS_S3_BUCKET), // Bucket to be used
+		Key:    aws.String(filename),      // Name of the file to be saved
+		Body:   file,                      // File
 	})
+	if err != nil {
+		// Do your error handling here
+		return
+	}
+}
 
-	return s3err
+func download() {
+	f, err := os.Create(filename)
+	if err != nil {
+		// Do your error handling here
+		return
+	}
+
+	downloader := s3manager.NewDownloader(sess)
+	_, err = downloader.Download(f, &s3.GetObjectInput{
+		Bucket: aws.String(AWS_S3_BUCKET),
+		Key:    aws.String(filename),
+	})
+	if err != nil {
+		// Do your error handling here
+		return
+	}
+}
+
+func list() {
+	svc := s3.New(sess)
+	input := &s3.ListObjectsInput{
+		Bucket: aws.String(AWS_S3_BUCKET),
+	}
+
+	result, err := svc.ListObjects(input)
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case s3.ErrCodeNoSuchBucket:
+				fmt.Println(s3.ErrCodeNoSuchBucket, aerr.Error())
+			default:
+				fmt.Println(aerr.Error())
+			}
+		} else {
+			fmt.Println(err.Error())
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "text/html")
+	for _, item := range result.Contents {
+		fmt.Fprintf(w, "<li>File %s</li>", *item.Key)
+	}
 }
