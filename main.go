@@ -1,100 +1,58 @@
-package main
+package upload
 
 import (
-	"bytes"
 	"fmt"
-	"log"
+	"io/ioutil"
 	"net/http"
-	"os"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/mitchellh/goamz/s3"
+	"github.com/nmerouze/stack/mux"
 )
 
-
-const (
-	AWS_S3_REGION = ""
-	AWS_S3_BUCKET = ""
-)
-
-var sess = connectAWS()
-
-func connectAWS() *session.Session {
-	sess, err := session.NewSession(
-		&aws.Config{
-			Region: aws.String(AWS_S3_REGION)
-		}
-	)
-	if err != nil {
-		panic(err)
-	}
-	return sess
+type appContext struct {
+	bucket *s3.Bucket
 }
 
-func upload() {
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		// Do your error handling here
+func (c *appContext) upsertFile(w http.ResponseWriter, r *http.Request) {
+	if r.Body == nil {
+		http.Error(w, "Body must be set", http.StatusBadRequest)
 		return
 	}
-	defer file.Close()
 
-	filename := header.Filename
-	uploader := s3manager.NewUploader(sess)
-
-	_, err = uploader.Upload(&s3manager.UploadInput{
-		Bucket: aws.String(AWS_S3_BUCKET), // Bucket to be used
-		Key:    aws.String(filename),      // Name of the file to be saved
-		Body:   file,                      // File
-	})
+	content, err := ioutil.ReadAll(r.Body)
 	if err != nil {
-		// Do your error handling here
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	path := mux.Params(r).ByName("path")
+	err = c.bucket.Put(path, content, r.Header.Get("Content-Type"), s3.PublicRead)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	url := c.bucket.URL(path)
+	w.Header().Set("Location", url)
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"url":"%s"}`, url)
 }
 
-func download() {
-	f, err := os.Create(filename)
-	if err != nil {
-		// Do your error handling here
-		return
-	}
-
-	downloader := s3manager.NewDownloader(sess)
-	_, err = downloader.Download(f, &s3.GetObjectInput{
-		Bucket: aws.String(AWS_S3_BUCKET),
-		Key:    aws.String(filename),
-	})
-	if err != nil {
-		// Do your error handling here
-		return
-	}
+func (c *appContext) getFile(w http.ResponseWriter, r *http.Request) {
+	url := c.bucket.URL(mux.Params(r).ByName("path"))
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"url":"%s"}`, url)
 }
 
-func list() {
-	svc := s3.New(sess)
-	input := &s3.ListObjectsInput{
-		Bucket: aws.String(AWS_S3_BUCKET),
-	}
-
-	result, err := svc.ListObjects(input)
-	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			switch aerr.Code() {
-			case s3.ErrCodeNoSuchBucket:
-				fmt.Println(s3.ErrCodeNoSuchBucket, aerr.Error())
-			default:
-				fmt.Println(aerr.Error())
-			}
-		} else {
-			fmt.Println(err.Error())
-		}
-		return
-	}
-	w.Header().Set("Content-Type", "text/html")
-	for _, item := range result.Contents {
-		fmt.Fprintf(w, "<li>File %s</li>", *item.Key)
-	}
+func (c *appContext) deleteFile(w http.ResponseWriter, r *http.Request) {
+	c.bucket.Del(mux.Params(r).ByName("path"))
+	w.WriteHeader(204)
 }
+
+func Service(bucket *s3.Bucket) http.Handler {
+	c := &appContext{bucket}
+	m := mux.New()
+	m.Get("/files/*path").ThenFunc(c.getFile)
+	m.Put("/files/*path").ThenFunc(c.upsertFile)
+	m.Delete("/files/*path").ThenFunc(c.deleteFile)
+	return m
